@@ -1,11 +1,11 @@
-"""Runtime entrypoint for the unified MLX/Torch benchmark.
+"""Runtime entrypoint for the MLX benchmark utility.
 
-This module intentionally keeps orchestration in one place:
+This module keeps the benchmark flow intentionally direct:
 - parse CLI arguments
-- resolve dtype/metric behavior
-- resolve and initialize backend
-- run benchmark loops
-- aggregate metrics and report them to console/CSV
+- resolve dtype mode (FLOPS, IOPS, or quantized QOPS)
+- initialize MLX backend
+- run warmup and measured loops
+- print and optionally save results
 """
 
 import argparse
@@ -15,52 +15,19 @@ import statistics
 import time
 
 from backends.common import (
+    EXACT_KERNEL_OPS_PER_ELEMENT,
     QUANT_GROUP_SIZE_FALLBACK,
     QUANT_GROUP_SIZE_PREFERRED,
     SUPPORTED_QUANT_BITS,
-    TORCH_INT_MATMUL_DTYPE_TOKENS,
     UnsupportedFeatureError,
 )
 
-INEXACT_DTYPE_TOKENS = {
-    "float16",
-    "bfloat16",
-    "float32",
-    "float64",
-    "complex64",
-    "complex128",
-}
 
-DTYPE_ITEMSIZE_FALLBACK = {
-    "bool": 1,
-    "uint8": 1,
-    "int8": 1,
-    "int16": 2,
-    "float16": 2,
-    "bfloat16": 2,
-    "int32": 4,
-    "float32": 4,
-    "int64": 8,
-    "float64": 8,
-    "complex64": 8,
-    "complex128": 16,
-}
-
-
-def try_import_mlx():
-    """Import MLX if available, otherwise return None."""
-    try:
-        import mlx.core as mx  # pylint: disable=import-outside-toplevel
-    except ModuleNotFoundError:
-        return None
-    return mx
-
-
-def resolve_dtype_info(dtype_token, metric, mlx_module):
-    """Resolve dtype mode and numeric metadata for throughput calculations."""
+def resolve_dtype_info(mx, dtype_token, metric):
+    """Resolve dtype behavior and numeric metadata for calculations."""
     use_quant_ops = False
     quant_bits = None
-    mlx_dtype = None
+    dtype = None
     is_inexact = False
     use_iops = False
     itemsize = None
@@ -74,27 +41,21 @@ def resolve_dtype_info(dtype_token, metric, mlx_module):
             raise ValueError("Quantized dtypes q* are supported only for --metric flops and --metric flops_graph.")
         use_quant_ops = True
         itemsize = quant_bits / 8
-        return use_quant_ops, quant_bits, mlx_dtype, is_inexact, use_iops, itemsize
+        return use_quant_ops, quant_bits, dtype, is_inexact, use_iops, itemsize
 
-    if mlx_module is not None and hasattr(mlx_module, dtype_token):
-        mlx_dtype = getattr(mlx_module, dtype_token)
-        is_inexact = mlx_module.issubdtype(mlx_dtype, mlx_module.inexact)
-        use_iops = metric in {"flops", "flops_graph"} and not is_inexact
-        itemsize = mlx_dtype.size
-        return use_quant_ops, quant_bits, mlx_dtype, is_inexact, use_iops, itemsize
-
-    if dtype_token not in DTYPE_ITEMSIZE_FALLBACK:
+    if not hasattr(mx, dtype_token):
         raise ValueError(f"Unsupported dtype '{dtype_token}'.")
 
-    is_inexact = dtype_token in INEXACT_DTYPE_TOKENS
+    dtype = getattr(mx, dtype_token)
+    is_inexact = mx.issubdtype(dtype, mx.inexact)
     use_iops = metric in {"flops", "flops_graph"} and not is_inexact
-    itemsize = DTYPE_ITEMSIZE_FALLBACK[dtype_token]
-    return use_quant_ops, quant_bits, mlx_dtype, is_inexact, use_iops, itemsize
+    itemsize = dtype.size
+    return use_quant_ops, quant_bits, dtype, is_inexact, use_iops, itemsize
 
 
 def parse_args():
     """Build and parse CLI arguments for the benchmark runtime."""
-    parser = argparse.ArgumentParser(description="Simple matrix benchmark with unified MLX/Torch backends.")
+    parser = argparse.ArgumentParser(description="Simple MLX matrix benchmark.")
     parser.add_argument(
         "--sizes",
         type=int,
@@ -108,12 +69,6 @@ def parse_args():
         help="MLX dtype (float32, int8, ...) or quantized alias (q2, q3, q4, q5, q6, q8).",
     )
     parser.add_argument(
-        "--backend",
-        choices=["auto", "mlx", "torch"],
-        default="auto",
-        help="Execution backend.",
-    )
-    parser.add_argument(
         "--device",
         choices=["cpu", "gpu"],
         default="gpu",
@@ -123,7 +78,7 @@ def parse_args():
         "--cpu-workers",
         type=int,
         default=0,
-        help="CPU worker count for both backends. 0 = all available CPU cores.",
+        help="CPU worker count. 0 = all available CPU cores.",
     )
     parser.add_argument(
         "--cpu-streams",
@@ -164,113 +119,25 @@ def resolve_cpu_workers(args):
     return os.cpu_count() or 1
 
 
-def resolve_runtime_backend(
-    requested_backend,
-    metric,
-    use_quant_ops,
-    use_iops,
-    dtype_token,
-    mlx_available,
-    torch_available,
-):
-    """Resolve backend for this run.
-
-    In auto mode:
-    - quantized aliases (q*) are MLX-only
-    - exact integer compute prefers Torch when available
-    - otherwise prefer MLX, then Torch
-    """
-    if requested_backend in {"mlx", "torch"}:
-        return requested_backend
-    if use_quant_ops:
-        return "mlx"
-    if metric in {"flops", "flops_graph"} and use_iops and dtype_token in TORCH_INT_MATMUL_DTYPE_TOKENS:
-        if torch_available:
-            return "torch"
-    if mlx_available:
-        return "mlx"
-    if torch_available:
-        return "torch"
-    raise ValueError("No backend is available. Install MLX and/or Torch.")
-
-
 def main():
-    """Execute full benchmark workflow.
-
-    Runtime flow:
-    1) Parse CLI and resolve effective CPU parallelism.
-    2) Decode dtype token into one of:
-       - quantized q* path
-       - inexact floating/complex path
-       - exact path (IOPS mode)
-    3) Resolve backend (auto/forced) and initialize backend object.
-    4) Print run configuration and mode notes.
-    5) For each requested matrix size:
-       - adjust effective size for q* constraints (if needed)
-       - prepare backend-specific tensors once
-       - run warmup + measured loops
-       - compute throughput numbers and collect rows
-    6) Print result table.
-    7) Optionally write CSV output.
-    """
+    """Execute full benchmark workflow."""
     args = parse_args()
-    from backends.torch_backend import TorchBackend, resolve_torch_dtype, try_import_torch
+
+    import mlx.core as mx  # Imported lazily so --help does not require MLX runtime init.
+    from backends.mlx_backend import MlxBackend
 
     cpu_workers = resolve_cpu_workers(args)
     dtype_token = args.dtype.lower()
 
-    mlx_module = try_import_mlx() if args.backend in {"auto", "mlx"} or dtype_token.startswith("q") else None
-    torch_module = try_import_torch() if args.backend in {"auto", "torch"} else None
-    use_quant_ops, quant_bits, mlx_dtype, is_inexact, use_iops, itemsize = resolve_dtype_info(
-        dtype_token, args.metric, mlx_module
-    )
-    runtime_backend = resolve_runtime_backend(
-        args.backend,
-        args.metric,
-        use_quant_ops,
-        use_iops,
-        dtype_token,
-        mlx_module is not None,
-        torch_module is not None,
+    use_quant_ops, quant_bits, dtype, is_inexact, use_iops, itemsize = resolve_dtype_info(
+        mx, dtype_token, args.metric
     )
 
-    if runtime_backend == "torch" and torch_module is None:
-        raise ValueError("Torch backend was requested but torch is not installed.")
-    if runtime_backend == "mlx" and mlx_module is None:
-        raise ValueError(
-            "MLX backend was requested but mlx is not installed on this platform. "
-            "Use --backend torch or install MLX manually."
-        )
-
-    if runtime_backend == "torch" and use_quant_ops:
-        raise ValueError(
-            'Torch backend does not support q* benchmark mode. '
-            'See README: "Why Torch q* Is Disabled". Use --backend mlx for q*.'
-        )
-
-    if runtime_backend == "torch":
-        torch_dtype = resolve_torch_dtype(torch_module, dtype_token)
-        if torch_dtype is None:
-            raise ValueError(f"Torch backend does not support dtype '{args.dtype}'.")
-        if args.metric in {"flops", "flops_graph"} and use_iops and dtype_token not in TORCH_INT_MATMUL_DTYPE_TOKENS:
-            raise ValueError(
-                "Torch backend compute metrics support exact dtypes int8/int16/int32/int64 only. "
-                "Use --backend mlx for this exact dtype."
-            )
-        backend = TorchBackend(torch_module, args.device, cpu_workers)
-    else:
-        from backends.mlx_backend import MlxBackend
-
-        torch_dtype = None
-        backend = MlxBackend(args.device, cpu_workers)
-
+    backend = MlxBackend(args.device, cpu_workers)
     results = []
 
     print(f"Device: {backend.device_summary()}")
-    if args.backend == "auto":
-        print(f"Backend: {runtime_backend} (auto)")
-    else:
-        print(f"Backend: {runtime_backend} (forced)")
+    print("Backend: mlx")
     if args.device == "cpu":
         print(f"Parallelism: {backend.parallelism_summary()}")
     print(f"Metric: {args.metric}")
@@ -283,18 +150,12 @@ def main():
     elif use_quant_ops:
         print(f"Compute mode: quantized_matmul (q{quant_bits}, affine)")
     elif use_iops:
-        if runtime_backend == "torch" and dtype_token in TORCH_INT_MATMUL_DTYPE_TOKENS:
-            print("Compute mode: IOPS (torch int matmul)")
-        else:
-            print("Compute mode: IOPS (MLX exact fallback kernel)")
+        print("Compute mode: IOPS (MLX exact kernel)")
     else:
-        if runtime_backend == "torch":
-            print("Compute mode: FLOPS (torch matmul)")
-        else:
-            print("Compute mode: FLOPS (MLX matmul)")
+        print("Compute mode: FLOPS (MLX matmul)")
 
     print("Transfer accounting: excluded (device-local tensors reused across runs)")
-    if runtime_backend == "mlx" and use_iops and args.metric in {"flops", "flops_graph"}:
+    if use_iops and args.metric in {"flops", "flops_graph"}:
         print(
             "Warning: MLX integer matmul is unavailable for this path. "
             "Using a simple exact kernel, so IOPS may be below hardware peak."
@@ -317,28 +178,21 @@ def main():
 
         elements = work_n * work_n
         matrix_bytes = elements * itemsize
-
-        if runtime_backend == "mlx":
-            case = backend.prepare_case(work_n, mlx_dtype, is_inexact, use_quant_ops, quant_bits, quant_group_size)
-        else:
-            case = backend.prepare_case(work_n, torch_dtype, is_inexact)
+        case = backend.prepare_case(work_n, dtype, is_inexact, use_quant_ops, quant_bits, quant_group_size)
 
         times = []
         for i in range(args.warmup + args.runs):
             t0 = time.perf_counter()
-            if runtime_backend == "mlx":
-                backend.run_once(
-                    case,
-                    args.metric,
-                    args.graph_steps,
-                    work_n,
-                    use_quant_ops,
-                    use_iops,
-                    quant_bits,
-                    quant_group_size,
-                )
-            else:
-                backend.run_once(case, args.metric, args.graph_steps)
+            backend.run_once(
+                case,
+                args.metric,
+                args.graph_steps,
+                work_n,
+                use_quant_ops,
+                use_iops,
+                quant_bits,
+                quant_group_size,
+            )
             elapsed = time.perf_counter() - t0
             if i >= args.warmup:
                 times.append(elapsed)
@@ -362,10 +216,7 @@ def main():
                 row["gqops"] = ops / median_s / 1e9
                 row["tqops"] = ops / median_s / 1e12
             elif use_iops:
-                if runtime_backend == "torch" and dtype_token in TORCH_INT_MATMUL_DTYPE_TOKENS:
-                    ops = 2 * (work_n**3)
-                else:
-                    ops = 5 * elements
+                ops = EXACT_KERNEL_OPS_PER_ELEMENT * elements
                 row["giops"] = ops / median_s / 1e9
                 row["tiops"] = ops / median_s / 1e12
             else:
@@ -379,10 +230,7 @@ def main():
                 row["gqops"] = ops / median_s / 1e9
                 row["tqops"] = ops / median_s / 1e12
             elif use_iops:
-                if runtime_backend == "torch" and dtype_token in TORCH_INT_MATMUL_DTYPE_TOKENS:
-                    ops = args.graph_steps * ((2 * (work_n**3)) + (work_n**2))
-                else:
-                    ops = args.graph_steps * (5 * elements)
+                ops = args.graph_steps * (EXACT_KERNEL_OPS_PER_ELEMENT * elements)
                 row["giops"] = ops / median_s / 1e9
                 row["tiops"] = ops / median_s / 1e12
             else:
@@ -480,7 +328,7 @@ def cli():
     """Console entrypoint used by uv tool / project scripts."""
     try:
         main()
-    except UnsupportedFeatureError as exc:
+    except (UnsupportedFeatureError, ValueError, ModuleNotFoundError) as exc:
         print(f"Error: {exc}")
         raise SystemExit(1)
 

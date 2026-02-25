@@ -1,8 +1,6 @@
 # nn-backend-test
 
-Small benchmark utility for MacBook matrix performance with a unified CLI and two backends:
-- `mlx`
-- `torch`
+Small MLX benchmark utility for matrix throughput checks.
 
 ## Metrics
 
@@ -12,9 +10,8 @@ Small benchmark utility for MacBook matrix performance with a unified CLI and tw
 
 ## Code Layout
 
-- `main.py`: runtime orchestration, backend selection, timing loop, reporting.
-- `backends/mlx_backend.py`: MLX execution path.
-- `backends/torch_backend.py`: Torch execution path.
+- `main.py`: runtime orchestration, timing loop, and reporting.
+- `backends/mlx_backend.py`: MLX execution path and device utilities.
 - `backends/common.py`: shared constants and common exceptions.
 
 ## Run
@@ -26,7 +23,7 @@ uv run python main.py
 Example with explicit parameters:
 
 ```bash
-uv run python main.py --metric flops_graph --backend auto --device gpu --sizes 2048 4096 --dtype float32 --graph-steps 8 --warmup 2 --runs 5
+uv run python main.py --metric flops_graph --device gpu --sizes 2048 4096 --dtype float32 --graph-steps 8 --warmup 2 --runs 5
 ```
 
 ## Install As Tool
@@ -38,11 +35,10 @@ uv tool install git+https://github.com/anfedoro/nn-backend-test.git
 ```
 
 Platform-dependent MLX install is handled automatically by dependency markers:
-- Apple Silicon (`darwin/arm64`) -> `mlx` + `torch`
-- Linux (`linux`, any CPU arch) -> `torch`
+- Apple Silicon (`darwin/arm64`) -> `mlx`
+- Linux (`linux`, any CPU arch) -> `mlx[cuda]`
 
-On Linux, the default install is Torch-only.
-`mlx[cuda]` is not installed by default because it conflicts with default PyPI Torch CUDA package pins.
+This project targets only those two MLX paths.
 
 Run installed commands:
 
@@ -59,84 +55,62 @@ uv tool install git+ssh://git@github.com/anfedoro/nn-backend-test.git
 
 ## Key Options
 
-- `--backend {auto,mlx,torch}`:
-  - `auto` (default): resolves backend by dtype/metric support.
-  - `mlx`: force MLX.
-  - `torch`: force Torch.
-- `--cpu-workers N`: unified CPU parallelism limit for both backends (`0` = all CPU cores).
+- `--cpu-workers N`: CPU parallelism limit (`0` = all CPU cores).
 - `--cpu-streams N`: deprecated alias for `--cpu-workers`.
 - `--device {cpu,gpu}`: logical target device.
 - `--dtype`: MLX dtype token (for example `float32`, `bfloat16`, `int8`, `uint32`, `complex64`) or quantized alias (`q2`, `q3`, `q4`, `q5`, `q6`, `q8`).
+- `--metric {bandwidth,flops,flops_graph}`: benchmark mode.
+- `--graph-steps N`: steps for `flops_graph`.
+- `--warmup N`: warmup iterations.
+- `--runs N`: measured iterations.
+- `--csv PATH`: optional CSV output path.
 
 ## DType Behavior
 
 - `q1` is unsupported.
 - `q2/q3/q4/q5/q6/q8` are quantized aliases and are MLX-only.
 - For quantized aliases, if `N` is incompatible with MLX quantization group sizes, the benchmark pads to an effective size and reports `eff n`.
-- Torch backend dtype support is limited to: `float16`, `bfloat16`, `float32`, `float64`, `int8`, `int16`, `int32`, `int64`, `uint8`, `bool`, `complex64`, `complex128`.
-- On Torch backend, compute metrics for exact dtypes are supported only for `int8/int16/int32/int64`.
+- For exact dtypes (`int*`, `uint*`, `bool`) compute metrics use a simple integer kernel (no integer matmul path).
 
 Units for compute metrics:
 - inexact dtypes (`float*`, `bfloat16`, `complex*`) -> `GFLOPS/TFLOPS`
 - exact dtypes (`int*`, `uint*`, `bool`) -> `GIOPS/TIOPS`
 - quantized aliases (`q*`) -> `GQOPS/TQOPS`
 
-## Backend Resolution (`--backend auto`)
+## Device Notes
 
-- `q*` -> MLX
-- compute metric + exact integer `int8/int16/int32/int64` -> Torch (if installed), otherwise MLX fallback exact kernel
-- everything else -> MLX (if installed), otherwise Torch
-
-When `--device gpu` is used:
-- Torch requires a visible GPU backend (`CUDA` or `MPS`).
-- MLX requires a visible MLX GPU backend (`CUDA` or `Metal`).
-
-## Comparability Policy
-
-- CPU parallelism is controlled by one flag: `--cpu-workers`.
-- Transfer time is excluded from throughput measurements:
-  - tensors are created on the target device
-  - tensors are reused across warmup/measured runs
-- Both backends use explicit synchronization before stopping timers.
-
-## Why Torch `q*` Is Disabled
-
-`q*` mode is intentionally disabled on Torch backend and remains MLX-only.
-
-Reasons:
-- this benchmark uses MLX `quantized_matmul(..., bits=q*)` semantics
-- Torch does not provide one direct, stable equivalent path for this benchmark mode across backends/devices
-- keeping `q*` MLX-only avoids mixed semantics and misleading cross-backend comparisons
-
-If you force Torch with `q*`, the script exits with a clear error and points to this section.
+- `--device gpu` requires a visible MLX GPU backend.
+- On Apple platforms this is Metal.
+- On Linux this is CUDA.
+- If GPU backend is unavailable, the script exits with a clear error.
 
 ## MLX Integer Fallback Note
 
-When running compute metrics on exact dtypes through MLX path, MLX integer matmul is not used in this utility.
-It falls back to a simple exact integer kernel and prints a one-time warning.
+When running compute metrics on exact dtypes, MLX integer matmul is not used in this utility.
+It uses a simple exact integer kernel and prints a warning.
 These IOPS numbers can be below real hardware integer peak.
 
 ## Examples
 
-Run with automatic backend resolution:
+Run floating-point graph benchmark on GPU:
 
 ```bash
-uv run python main.py --metric flops_graph --backend auto --device gpu --sizes 4096 --dtype int32 --graph-steps 100
+uv run python main.py --metric flops_graph --device gpu --sizes 4096 --dtype float32 --graph-steps 100
 ```
 
-Force MLX quantized path:
+Run quantized MLX path:
 
 ```bash
-uv run python main.py --metric flops_graph --backend mlx --device gpu --sizes 1000 --dtype q8 --graph-steps 100
+uv run python main.py --metric flops_graph --device gpu --sizes 1000 --dtype q8 --graph-steps 100
 ```
 
-Force Torch integer matmul path:
+Run integer IOPS path:
 
 ```bash
-uv run python main.py --metric flops_graph --backend torch --device gpu --sizes 4096 --dtype int32 --graph-steps 100
+uv run python main.py --metric flops_graph --device gpu --sizes 4096 --dtype int32 --graph-steps 100
 ```
 
-Force all CPU cores on both backends:
+Use all CPU cores:
 
 ```bash
 uv run python main.py --metric bandwidth --device cpu --cpu-workers 0 --sizes 1024 2048 --dtype float32
@@ -160,7 +134,6 @@ For `--metric bandwidth`:
 - `GB/s`: effective memory bandwidth
 
 For `--metric flops` and `--metric flops_graph`:
-- output columns are selected automatically by mode:
-  - `GFLOPS/TFLOPS`
-  - `GIOPS/TIOPS`
-  - `GQOPS/TQOPS`
+- inexact dtypes -> `GFLOPS/TFLOPS`
+- exact dtypes -> `GIOPS/TIOPS`
+- quantized aliases -> `GQOPS/TQOPS`

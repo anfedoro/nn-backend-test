@@ -128,7 +128,7 @@ class MlxBackend:
         if device == "gpu" and not mlx_gpu_is_available():
             raise UnsupportedFeatureError(
                 "MLX GPU backend is unavailable on this system. "
-                "No supported GPU was detected. Use --device cpu or --backend torch."
+                "No supported GPU was detected. Use --device cpu."
             )
         device_map = {"cpu": mx.cpu, "gpu": mx.gpu}
         mx.set_default_device(device_map[device])
