@@ -1,0 +1,11 @@
+[project]
+name = "nn-backend-test"
+version = "0.1.0"
+description = "Unified NN backend benchmark for MLX and Torch"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "mlx>=0.30.0",
+    "numpy>=2.0.0",
+    "torch>=2.10.0",
+]
