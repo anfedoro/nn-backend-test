@@ -29,6 +29,27 @@ Example with explicit parameters:
 uv run python main.py --metric flops_graph --backend auto --device gpu --sizes 2048 4096 --dtype float32 --graph-steps 8 --warmup 2 --runs 5
 ```
 
+## Install As Tool
+
+Install from Git:
+
+```bash
+uv tool install git+https://github.com/anfedoro/nn-backend-test.git
+```
+
+Run installed commands:
+
+```bash
+nn-backend-test --help
+nnbt --help
+```
+
+For private repository access, authenticate Git first (`gh auth login` + `gh auth setup-git`) or use SSH URL:
+
+```bash
+uv tool install git+ssh://git@github.com/anfedoro/nn-backend-test.git
+```
+
 ## Key Options
 
 - `--backend {auto,mlx,torch}`:

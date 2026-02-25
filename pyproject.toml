@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "nn-backend-test"
 version = "0.1.0"
@@ -9,3 +13,11 @@ dependencies = [
     "numpy>=2.0.0",
     "torch>=2.10.0",
 ]
+
+[project.scripts]
+nn-backend-test = "main:cli"
+nnbt = "main:cli"
+
+[tool.setuptools]
+py-modules = ["main"]
+packages = ["backends"]

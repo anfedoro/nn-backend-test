@@ -406,9 +406,14 @@ def main():
         print(f"Saved CSV: {args.csv}")
 
 
-if __name__ == "__main__":
+def cli():
+    """Console entrypoint used by uv tool / project scripts."""
     try:
         main()
     except UnsupportedFeatureError as exc:
         print(f"Error: {exc}")
         raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    cli()
