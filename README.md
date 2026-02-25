@@ -37,6 +37,12 @@ Install from Git:
 uv tool install git+https://github.com/anfedoro/nn-backend-test.git
 ```
 
+Platform-dependent MLX install is handled automatically by dependency markers:
+- Apple Silicon (`darwin/arm64`) -> `mlx`
+- Linux x86_64 (`linux/x86_64`) -> `mlx[cuda]`
+
+Torch is installed by default on Apple Silicon in this project setup.
+
 Run installed commands:
 
 ```bash

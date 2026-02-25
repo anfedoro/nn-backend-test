@@ -9,9 +9,10 @@ description = "Unified NN backend benchmark for MLX and Torch"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "mlx>=0.30.0",
     "numpy>=2.0.0",
-    "torch>=2.10.0",
+    "mlx>=0.30.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx[cuda]>=0.30.0; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'amd64')",
+    "torch>=2.10.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.scripts]
