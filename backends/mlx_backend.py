@@ -79,6 +79,21 @@ def detect_mlx_backend(device):
     return str(device.type)
 
 
+def mlx_gpu_is_available():
+    """Return True when MLX can run GPU kernels on this machine."""
+    try:
+        if mx.cuda.is_available():
+            return True
+    except Exception:
+        pass
+    try:
+        if mx.metal.is_available():
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def format_mlx_device_summary(device):
     """Build a detailed MLX device summary for console output."""
     backend = detect_mlx_backend(device)
@@ -110,6 +125,11 @@ class MlxBackend:
         """Initialize MLX backend and CPU stream pool when needed."""
         self.device = device
         self.cpu_workers = cpu_workers
+        if device == "gpu" and not mlx_gpu_is_available():
+            raise UnsupportedFeatureError(
+                "MLX GPU backend is unavailable on this system. "
+                "No supported GPU was detected. Use --device cpu or --backend torch."
+            )
         device_map = {"cpu": mx.cpu, "gpu": mx.gpu}
         mx.set_default_device(device_map[device])
         self.streams = [mx.new_stream(mx.cpu) for _ in range(cpu_workers)] if device == "cpu" else []

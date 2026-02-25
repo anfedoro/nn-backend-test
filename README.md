@@ -38,10 +38,11 @@ uv tool install git+https://github.com/anfedoro/nn-backend-test.git
 ```
 
 Platform-dependent MLX install is handled automatically by dependency markers:
-- Apple Silicon (`darwin/arm64`) -> `mlx`
-- Linux x86_64 (`linux/x86_64`) -> `mlx[cuda]`
+- Apple Silicon (`darwin/arm64`) -> `mlx` + `torch`
+- Linux (`linux`, any CPU arch) -> `torch`
 
-Torch is installed by default on Apple Silicon in this project setup.
+On Linux, the default install is Torch-only.
+`mlx[cuda]` is not installed by default because it conflicts with default PyPI Torch CUDA package pins.
 
 Run installed commands:
 
@@ -84,7 +85,11 @@ Units for compute metrics:
 
 - `q*` -> MLX
 - compute metric + exact integer `int8/int16/int32/int64` -> Torch (if installed), otherwise MLX fallback exact kernel
-- everything else -> MLX
+- everything else -> MLX (if installed), otherwise Torch
+
+When `--device gpu` is used:
+- Torch requires a visible GPU backend (`CUDA` or `MPS`).
+- MLX requires a visible MLX GPU backend (`CUDA` or `Metal`).
 
 ## Comparability Policy
 

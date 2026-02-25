@@ -22,6 +22,75 @@ from backends.common import (
     UnsupportedFeatureError,
 )
 
+INEXACT_DTYPE_TOKENS = {
+    "float16",
+    "bfloat16",
+    "float32",
+    "float64",
+    "complex64",
+    "complex128",
+}
+
+DTYPE_ITEMSIZE_FALLBACK = {
+    "bool": 1,
+    "uint8": 1,
+    "int8": 1,
+    "int16": 2,
+    "float16": 2,
+    "bfloat16": 2,
+    "int32": 4,
+    "float32": 4,
+    "int64": 8,
+    "float64": 8,
+    "complex64": 8,
+    "complex128": 16,
+}
+
+
+def try_import_mlx():
+    """Import MLX if available, otherwise return None."""
+    try:
+        import mlx.core as mx  # pylint: disable=import-outside-toplevel
+    except ModuleNotFoundError:
+        return None
+    return mx
+
+
+def resolve_dtype_info(dtype_token, metric, mlx_module):
+    """Resolve dtype mode and numeric metadata for throughput calculations."""
+    use_quant_ops = False
+    quant_bits = None
+    mlx_dtype = None
+    is_inexact = False
+    use_iops = False
+    itemsize = None
+
+    if dtype_token.startswith("q") and dtype_token[1:].isdigit():
+        quant_bits = int(dtype_token[1:])
+        if quant_bits not in SUPPORTED_QUANT_BITS:
+            supported = ", ".join(f"q{b}" for b in sorted(SUPPORTED_QUANT_BITS))
+            raise ValueError(f"Unsupported quantized dtype '{dtype_token}'. MLX supports: {supported}.")
+        if metric == "bandwidth":
+            raise ValueError("Quantized dtypes q* are supported only for --metric flops and --metric flops_graph.")
+        use_quant_ops = True
+        itemsize = quant_bits / 8
+        return use_quant_ops, quant_bits, mlx_dtype, is_inexact, use_iops, itemsize
+
+    if mlx_module is not None and hasattr(mlx_module, dtype_token):
+        mlx_dtype = getattr(mlx_module, dtype_token)
+        is_inexact = mlx_module.issubdtype(mlx_dtype, mlx_module.inexact)
+        use_iops = metric in {"flops", "flops_graph"} and not is_inexact
+        itemsize = mlx_dtype.size
+        return use_quant_ops, quant_bits, mlx_dtype, is_inexact, use_iops, itemsize
+
+    if dtype_token not in DTYPE_ITEMSIZE_FALLBACK:
+        raise ValueError(f"Unsupported dtype '{dtype_token}'.")
+
+    is_inexact = dtype_token in INEXACT_DTYPE_TOKENS
+    use_iops = metric in {"flops", "flops_graph"} and not is_inexact
+    itemsize = DTYPE_ITEMSIZE_FALLBACK[dtype_token]
+    return use_quant_ops, quant_bits, mlx_dtype, is_inexact, use_iops, itemsize
+
 
 def parse_args():
     """Build and parse CLI arguments for the benchmark runtime."""
@@ -95,22 +164,34 @@ def resolve_cpu_workers(args):
     return os.cpu_count() or 1
 
 
-def resolve_runtime_backend(requested_backend, metric, use_quant_ops, use_iops, dtype_token, torch_module):
+def resolve_runtime_backend(
+    requested_backend,
+    metric,
+    use_quant_ops,
+    use_iops,
+    dtype_token,
+    mlx_available,
+    torch_available,
+):
     """Resolve backend for this run.
 
     In auto mode:
     - quantized aliases (q*) are MLX-only
     - exact integer compute prefers Torch when available
-    - everything else uses MLX
+    - otherwise prefer MLX, then Torch
     """
     if requested_backend in {"mlx", "torch"}:
         return requested_backend
     if use_quant_ops:
         return "mlx"
     if metric in {"flops", "flops_graph"} and use_iops and dtype_token in TORCH_INT_MATMUL_DTYPE_TOKENS:
-        if torch_module is not None:
+        if torch_available:
             return "torch"
-    return "mlx"
+    if mlx_available:
+        return "mlx"
+    if torch_available:
+        return "torch"
+    raise ValueError("No backend is available. Install MLX and/or Torch.")
 
 
 def main():
@@ -133,44 +214,33 @@ def main():
     7) Optionally write CSV output.
     """
     args = parse_args()
-    import mlx.core as mx  # Imported lazily so --help does not require MLX runtime init.
-    from backends.mlx_backend import MlxBackend
     from backends.torch_backend import TorchBackend, resolve_torch_dtype, try_import_torch
 
     cpu_workers = resolve_cpu_workers(args)
     dtype_token = args.dtype.lower()
 
-    use_quant_ops = False
-    quant_bits = None
-    dtype = None
-    is_inexact = False
-    use_iops = False
-    itemsize = None
-
-    if dtype_token.startswith("q") and dtype_token[1:].isdigit():
-        quant_bits = int(dtype_token[1:])
-        if quant_bits not in SUPPORTED_QUANT_BITS:
-            supported = ", ".join(f"q{b}" for b in sorted(SUPPORTED_QUANT_BITS))
-            raise ValueError(f"Unsupported quantized dtype '{args.dtype}'. MLX supports: {supported}.")
-        if args.metric == "bandwidth":
-            raise ValueError("Quantized dtypes q* are supported only for --metric flops and --metric flops_graph.")
-        use_quant_ops = True
-        itemsize = quant_bits / 8
-    else:
-        if not hasattr(mx, dtype_token):
-            raise ValueError(f"Unsupported dtype '{args.dtype}'.")
-        dtype = getattr(mx, dtype_token)
-        is_inexact = mx.issubdtype(dtype, mx.inexact)
-        use_iops = args.metric in {"flops", "flops_graph"} and not is_inexact
-        itemsize = dtype.size
-
+    mlx_module = try_import_mlx() if args.backend in {"auto", "mlx"} or dtype_token.startswith("q") else None
     torch_module = try_import_torch() if args.backend in {"auto", "torch"} else None
+    use_quant_ops, quant_bits, mlx_dtype, is_inexact, use_iops, itemsize = resolve_dtype_info(
+        dtype_token, args.metric, mlx_module
+    )
     runtime_backend = resolve_runtime_backend(
-        args.backend, args.metric, use_quant_ops, use_iops, dtype_token, torch_module
+        args.backend,
+        args.metric,
+        use_quant_ops,
+        use_iops,
+        dtype_token,
+        mlx_module is not None,
+        torch_module is not None,
     )
 
-    if args.backend == "torch" and torch_module is None:
+    if runtime_backend == "torch" and torch_module is None:
         raise ValueError("Torch backend was requested but torch is not installed.")
+    if runtime_backend == "mlx" and mlx_module is None:
+        raise ValueError(
+            "MLX backend was requested but mlx is not installed on this platform. "
+            "Use --backend torch or install MLX manually."
+        )
 
     if runtime_backend == "torch" and use_quant_ops:
         raise ValueError(
@@ -189,6 +259,8 @@ def main():
             )
         backend = TorchBackend(torch_module, args.device, cpu_workers)
     else:
+        from backends.mlx_backend import MlxBackend
+
         torch_dtype = None
         backend = MlxBackend(args.device, cpu_workers)
 
@@ -247,7 +319,7 @@ def main():
         matrix_bytes = elements * itemsize
 
         if runtime_backend == "mlx":
-            case = backend.prepare_case(work_n, dtype, is_inexact, use_quant_ops, quant_bits, quant_group_size)
+            case = backend.prepare_case(work_n, mlx_dtype, is_inexact, use_quant_ops, quant_bits, quant_group_size)
         else:
             case = backend.prepare_case(work_n, torch_dtype, is_inexact)
 
