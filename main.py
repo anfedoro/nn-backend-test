@@ -14,18 +14,12 @@ import os
 import statistics
 import time
 
-import mlx.core as mx
-
-from backends import (
-    MlxBackend,
+from backends.common import (
     QUANT_GROUP_SIZE_FALLBACK,
     QUANT_GROUP_SIZE_PREFERRED,
     SUPPORTED_QUANT_BITS,
     TORCH_INT_MATMUL_DTYPE_TOKENS,
-    TorchBackend,
     UnsupportedFeatureError,
-    resolve_torch_dtype,
-    try_import_torch,
 )
 
 
@@ -139,6 +133,10 @@ def main():
     7) Optionally write CSV output.
     """
     args = parse_args()
+    import mlx.core as mx  # Imported lazily so --help does not require MLX runtime init.
+    from backends.mlx_backend import MlxBackend
+    from backends.torch_backend import TorchBackend, resolve_torch_dtype, try_import_torch
+
     cpu_workers = resolve_cpu_workers(args)
     dtype_token = args.dtype.lower()
 
