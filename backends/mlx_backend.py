@@ -9,18 +9,15 @@ import mlx.core as mx
 from .common import UnsupportedFeatureError
 
 
-def make_mlx_inputs(n, dtype, is_inexact):
-    """Create two MLX input matrices matching requested dtype behavior."""
+def make_mlx_input(n, dtype, is_inexact):
+    """Create one MLX input matrix matching requested dtype behavior."""
     if dtype == mx.bool_:
         a = mx.random.randint(0, 2, shape=(n, n), dtype=dtype)
-        b = mx.random.randint(0, 2, shape=(n, n), dtype=dtype)
     elif is_inexact:
         a = mx.random.uniform(shape=(n, n), dtype=mx.float32).astype(dtype)
-        b = mx.random.uniform(shape=(n, n), dtype=mx.float32).astype(dtype)
     else:
         a = mx.random.randint(0, 127, shape=(n, n), dtype=dtype)
-        b = mx.random.randint(0, 127, shape=(n, n), dtype=dtype)
-    return a, b
+    return a
 
 
 def exact_compute_once(x, y):
@@ -161,7 +158,8 @@ class MlxBackend:
                 "q_biases": q_biases,
             }
 
-        a, b = make_mlx_inputs(work_n, dtype, is_inexact)
+        a = make_mlx_input(work_n, dtype, is_inexact)
+        b = make_mlx_input(work_n, dtype, is_inexact)
         mx.eval(a, b)
         return {"a": a, "b": b}
 
@@ -212,7 +210,7 @@ class MlxBackend:
                 b_part = b[start:end]
                 with mx.stream(stream):
                     if metric == "bandwidth":
-                        out = a_part + b_part
+                        out = mx.array(a_part)
                     elif metric == "flops":
                         if use_iops:
                             out = exact_compute_once(a_part, b_part)
@@ -230,7 +228,7 @@ class MlxBackend:
                 outs.append(out)
         else:
             if metric == "bandwidth":
-                out = a + b
+                out = mx.array(a)
             elif metric == "flops":
                 if use_iops:
                     out = exact_compute_once(a, b)

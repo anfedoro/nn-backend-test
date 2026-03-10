@@ -4,7 +4,7 @@ Small MLX benchmark utility for matrix throughput checks.
 
 ## Metrics
 
-- `bandwidth`: memory bandwidth estimation with `a + b` (`GB/s`)
+- `bandwidth`: memory bandwidth estimation with matrix copy (`GB/s`)
 - `flops`: single-step compute throughput
 - `flops_graph`: lazy/repeated graph-style compute throughput (`--graph-steps`)
 
@@ -70,6 +70,7 @@ uv tool install git+ssh://git@github.com/anfedoro/nn-backend-test.git
 - `q1` is unsupported.
 - `q2/q3/q4/q5/q6/q8` are quantized aliases and are MLX-only.
 - For quantized aliases, if `N` is incompatible with MLX quantization group sizes, the benchmark pads to an effective size and reports `eff n`.
+- Quantized MLX runs use `quantized_matmul`: activations stay in `float32`, quantized weights are stored as packed weights plus `float32` scales and biases, and the output is materialized in `float32`.
 - For exact dtypes (`int*`, `uint*`, `bool`) compute metrics use a simple integer kernel (no integer matmul path).
 
 Units for compute metrics:
@@ -127,10 +128,12 @@ uv run python main.py --metric bandwidth --sizes 1024 2048 --csv result.csv
 - `n`: requested matrix size `N` for `N x N`
 - `eff n`: effective matrix size after quantized padding (only for `q*`)
 - `matrix MiB`: size of one matrix
+- `act MiB`: activation matrix storage for quantized runs
+- `weight MiB`: quantized weight package storage for quantized runs (`q_w + scales + biases`)
 - `median ms`: median run time
 
 For `--metric bandwidth`:
-- `I/O MiB`: estimated per-run data traffic (`read A + read B + write C`)
+- `I/O MiB`: estimated per-run data traffic (`read src + write dst`)
 - `GB/s`: effective memory bandwidth
 
 For `--metric flops` and `--metric flops_graph`:

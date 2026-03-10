@@ -10,6 +10,7 @@ This module keeps the benchmark flow intentionally direct:
 
 import argparse
 import csv
+import math
 import os
 import statistics
 import time
@@ -40,7 +41,6 @@ def resolve_dtype_info(mx, dtype_token, metric):
         if metric == "bandwidth":
             raise ValueError("Quantized dtypes q* are supported only for --metric flops and --metric flops_graph.")
         use_quant_ops = True
-        itemsize = quant_bits / 8
         return use_quant_ops, quant_bits, dtype, is_inexact, use_iops, itemsize
 
     if not hasattr(mx, dtype_token):
@@ -119,6 +119,22 @@ def resolve_cpu_workers(args):
     return os.cpu_count() or 1
 
 
+def array_nbytes(arr):
+    """Return materialized byte size for an MLX array."""
+    return math.prod(arr.shape) * arr.dtype.size
+
+
+def quantized_storage_bytes(case):
+    """Return storage bytes for quantized weights and float activations."""
+    activation_bytes = array_nbytes(case["x"])
+    weight_bytes = (
+        array_nbytes(case["q_w"])
+        + array_nbytes(case["q_scales"])
+        + array_nbytes(case["q_biases"])
+    )
+    return activation_bytes, weight_bytes
+
+
 def main():
     """Execute full benchmark workflow."""
     args = parse_args()
@@ -146,7 +162,7 @@ def main():
     print(f"DType: {args.dtype}")
 
     if args.metric == "bandwidth":
-        print("Compute mode: bandwidth (a + b)")
+        print("Compute mode: bandwidth (copy)")
     elif use_quant_ops:
         print(f"Compute mode: quantized_matmul (q{quant_bits}, affine)")
     elif use_iops:
@@ -176,9 +192,12 @@ def main():
                 work_n = ((n + quant_group_size - 1) // quant_group_size) * quant_group_size
                 print(f"Note: size {n} padded to {work_n} for quantization group_size={quant_group_size}.")
 
-        elements = work_n * work_n
-        matrix_bytes = elements * itemsize
         case = backend.prepare_case(work_n, dtype, is_inexact, use_quant_ops, quant_bits, quant_group_size)
+        elements = work_n * work_n
+        if use_quant_ops:
+            activation_bytes, weight_bytes = quantized_storage_bytes(case)
+        else:
+            matrix_bytes = elements * itemsize
 
         times = []
         for i in range(args.warmup + args.runs):
@@ -198,16 +217,16 @@ def main():
                 times.append(elapsed)
 
         median_s = statistics.median(times)
-        row = {
-            "n": n,
-            "matrix_mib": matrix_bytes / (1024**2),
-            "median_ms": median_s * 1000,
-        }
+        row = {"n": n, "median_ms": median_s * 1000}
         if use_quant_ops:
+            row["activation_mib"] = activation_bytes / (1024**2)
+            row["weight_mib"] = weight_bytes / (1024**2)
             row["effective_n"] = work_n
+        else:
+            row["matrix_mib"] = matrix_bytes / (1024**2)
 
         if args.metric == "bandwidth":
-            bytes_per_run = 3 * matrix_bytes
+            bytes_per_run = 2 * matrix_bytes
             row["io_mib"] = bytes_per_run / (1024**2)
             row["bandwidth_gbps"] = bytes_per_run / median_s / 1e9
         elif args.metric == "flops":
@@ -244,14 +263,20 @@ def main():
         header = f"{'n':>8}{'matrix MiB':>14}{'I/O MiB':>12}{'median ms':>12}{'GB/s':>12}"
     elif args.metric == "flops":
         if use_quant_ops:
-            header = f"{'n':>8}{'eff n':>10}{'matrix MiB':>14}{'median ms':>12}{'GQOPS':>12}{'TQOPS':>12}"
+            header = (
+                f"{'n':>8}{'eff n':>10}{'act MiB':>12}{'weight MiB':>14}"
+                f"{'median ms':>12}{'GQOPS':>12}{'TQOPS':>12}"
+            )
         elif use_iops:
             header = f"{'n':>8}{'matrix MiB':>14}{'median ms':>12}{'GIOPS':>12}{'TIOPS':>12}"
         else:
             header = f"{'n':>8}{'matrix MiB':>14}{'median ms':>12}{'GFLOPS':>12}{'TFLOPS':>12}"
     else:
         if use_quant_ops:
-            header = f"{'n':>8}{'eff n':>10}{'matrix MiB':>14}{'steps':>8}{'median ms':>12}{'GQOPS':>12}{'TQOPS':>12}"
+            header = (
+                f"{'n':>8}{'eff n':>10}{'act MiB':>12}{'weight MiB':>14}{'steps':>8}"
+                f"{'median ms':>12}{'GQOPS':>12}{'TQOPS':>12}"
+            )
         elif use_iops:
             header = f"{'n':>8}{'matrix MiB':>14}{'steps':>8}{'median ms':>12}{'GIOPS':>12}{'TIOPS':>12}"
         else:
@@ -269,7 +294,8 @@ def main():
         elif args.metric == "flops":
             if use_quant_ops:
                 print(
-                    f"{row['n']:>8}{row['effective_n']:>10}{row['matrix_mib']:>14.2f}"
+                    f"{row['n']:>8}{row['effective_n']:>10}{row['activation_mib']:>12.2f}"
+                    f"{row['weight_mib']:>14.2f}"
                     f"{row['median_ms']:>12.3f}{row['gqops']:>12.2f}{row['tqops']:>12.4f}"
                 )
             elif use_iops:
@@ -285,7 +311,8 @@ def main():
         else:
             if use_quant_ops:
                 print(
-                    f"{row['n']:>8}{row['effective_n']:>10}{row['matrix_mib']:>14.2f}{row['graph_steps']:>8}"
+                    f"{row['n']:>8}{row['effective_n']:>10}{row['activation_mib']:>12.2f}"
+                    f"{row['weight_mib']:>14.2f}{row['graph_steps']:>8}"
                     f"{row['median_ms']:>12.3f}{row['gqops']:>12.2f}{row['tqops']:>12.4f}"
                 )
             elif use_iops:
@@ -304,14 +331,23 @@ def main():
             fieldnames = ["n", "matrix_mib", "io_mib", "median_ms", "bandwidth_gbps"]
         elif args.metric == "flops":
             if use_quant_ops:
-                fieldnames = ["n", "effective_n", "matrix_mib", "median_ms", "gqops", "tqops"]
+                fieldnames = ["n", "effective_n", "activation_mib", "weight_mib", "median_ms", "gqops", "tqops"]
             elif use_iops:
                 fieldnames = ["n", "matrix_mib", "median_ms", "giops", "tiops"]
             else:
                 fieldnames = ["n", "matrix_mib", "median_ms", "gflops", "tflops"]
         else:
             if use_quant_ops:
-                fieldnames = ["n", "effective_n", "matrix_mib", "graph_steps", "median_ms", "gqops", "tqops"]
+                fieldnames = [
+                    "n",
+                    "effective_n",
+                    "activation_mib",
+                    "weight_mib",
+                    "graph_steps",
+                    "median_ms",
+                    "gqops",
+                    "tqops",
+                ]
             elif use_iops:
                 fieldnames = ["n", "matrix_mib", "graph_steps", "median_ms", "giops", "tiops"]
             else:
