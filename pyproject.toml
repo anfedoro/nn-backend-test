@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nn-backend-test"
-version = "0.1.1"
+version = "0.1.2"
 description = "MLX benchmark utility for matrix throughput checks"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -16,9 +16,9 @@ dependencies = [
 ]
 
 [project.scripts]
-nn-backend-test = "main:cli"
-nnbt = "main:cli"
+nn-backend-test = "bootstrap:cli"
+nnbt = "bootstrap:cli"
 
 [tool.setuptools]
-py-modules = ["main"]
+py-modules = ["bootstrap", "main"]
 packages = ["backends"]

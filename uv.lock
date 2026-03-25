@@ -49,7 +49,7 @@ wheels = [
 
 [[package]]
 name = "nn-backend-test"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "mlx", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or sys_platform == 'linux'" },

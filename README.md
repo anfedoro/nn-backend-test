@@ -86,6 +86,7 @@ Units for compute metrics:
 - `--device hybrid` is not an isolated peak benchmark; results depend on real CPU/GPU overlap inside MLX.
 - On Apple platforms this is Metal.
 - On Linux this is CUDA. The package installs the explicit `mlx-cuda-13` runtime stack.
+- Linux CLI entrypoints bootstrap bundled NVIDIA shared libraries from the installed Python environment automatically; manual `LD_LIBRARY_PATH` setup should not be required for the packaged tool.
 - If GPU backend is unavailable, the script exits with a clear error.
 
 Hybrid limitations:
