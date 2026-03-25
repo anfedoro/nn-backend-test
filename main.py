@@ -70,7 +70,7 @@ def parse_args():
     )
     parser.add_argument(
         "--device",
-        choices=["cpu", "gpu"],
+        choices=["cpu", "gpu", "hybrid"],
         default="gpu",
         help="Target device type.",
     )
@@ -145,6 +145,9 @@ def main():
     cpu_workers = resolve_cpu_workers(args)
     dtype_token = args.dtype.lower()
 
+    if args.device == "hybrid" and args.metric != "bandwidth":
+        raise ValueError("--device hybrid is supported only for --metric bandwidth.")
+
     use_quant_ops, quant_bits, dtype, is_inexact, use_iops, itemsize = resolve_dtype_info(
         mx, dtype_token, args.metric
     )
@@ -154,7 +157,7 @@ def main():
 
     print(f"Device: {backend.device_summary()}")
     print("Backend: mlx")
-    if args.device == "cpu":
+    if args.device in {"cpu", "hybrid"}:
         print(f"Parallelism: {backend.parallelism_summary()}")
     print(f"Metric: {args.metric}")
     if args.metric == "flops_graph":
@@ -162,7 +165,10 @@ def main():
     print(f"DType: {args.dtype}")
 
     if args.metric == "bandwidth":
-        print("Compute mode: bandwidth (copy)")
+        if args.device == "hybrid":
+            print("Compute mode: hybrid bandwidth (copy, experimental contention benchmark)")
+        else:
+            print("Compute mode: bandwidth (copy)")
     elif use_quant_ops:
         print(f"Compute mode: quantized_matmul (q{quant_bits}, affine)")
     elif use_iops:
@@ -171,6 +177,8 @@ def main():
         print("Compute mode: FLOPS (MLX matmul)")
 
     print("Transfer accounting: excluded (device-local tensors reused across runs)")
+    if args.device == "hybrid":
+        print("Hybrid note: aggregate bandwidth depends on real CPU/GPU overlap inside MLX.")
     if use_iops and args.metric in {"flops", "flops_graph"}:
         print(
             "Warning: MLX integer matmul is unavailable for this path. "
@@ -192,7 +200,7 @@ def main():
                 work_n = ((n + quant_group_size - 1) // quant_group_size) * quant_group_size
                 print(f"Note: size {n} padded to {work_n} for quantization group_size={quant_group_size}.")
 
-        case = backend.prepare_case(work_n, dtype, is_inexact, use_quant_ops, quant_bits, quant_group_size)
+        case = backend.prepare_case(args.metric, work_n, dtype, is_inexact, use_quant_ops, quant_bits, quant_group_size)
         elements = work_n * work_n
         if use_quant_ops:
             activation_bytes, weight_bytes = quantized_storage_bytes(case)
@@ -223,12 +231,20 @@ def main():
             row["weight_mib"] = weight_bytes / (1024**2)
             row["effective_n"] = work_n
         else:
-            row["matrix_mib"] = matrix_bytes / (1024**2)
+            if args.device == "hybrid" and args.metric == "bandwidth":
+                row["matrix_mib"] = (2 * matrix_bytes) / (1024**2)
+            else:
+                row["matrix_mib"] = matrix_bytes / (1024**2)
 
         if args.metric == "bandwidth":
-            bytes_per_run = 2 * matrix_bytes
-            row["io_mib"] = bytes_per_run / (1024**2)
-            row["bandwidth_gbps"] = bytes_per_run / median_s / 1e9
+            if args.device == "hybrid":
+                total_bytes_per_run = 4 * matrix_bytes
+                row["io_mib"] = total_bytes_per_run / (1024**2)
+                row["bandwidth_gbps"] = total_bytes_per_run / median_s / 1e9
+            else:
+                bytes_per_run = 2 * matrix_bytes
+                row["io_mib"] = bytes_per_run / (1024**2)
+                row["bandwidth_gbps"] = bytes_per_run / median_s / 1e9
         elif args.metric == "flops":
             if use_quant_ops:
                 ops = 2 * (work_n**3)

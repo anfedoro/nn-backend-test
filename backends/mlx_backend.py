@@ -43,6 +43,16 @@ def quantized_matmul_once(x, q_w, q_scales, q_biases, bits, group_size):
     )
 
 
+def materialize_copy(x):
+    """Force a real copy in MLX.
+
+    `mx.array(x)` can alias the same underlying storage and benchmark as a
+    near no-op. Stacking a single tensor forces allocation and data movement,
+    and slicing back removes the temporary axis after materialization.
+    """
+    return mx.stack([x], axis=0)[0]
+
+
 def ensure_gpu_qmm_supported(x, q_w, q_scales, q_biases, bits, group_size):
     """Probe GPU quantized matmul support and raise clear error if unavailable."""
     try:
@@ -59,9 +69,10 @@ def ensure_gpu_qmm_supported(x, q_w, q_scales, q_biases, bits, group_size):
 
 def detect_mlx_backend(device):
     """Return human-readable MLX backend name for the selected device."""
-    if device.type == mx.cpu:
+    device_type = getattr(device, "type", device)
+    if device_type == mx.cpu:
         return "CPU"
-    if device.type == mx.gpu:
+    if device_type == mx.gpu:
         try:
             if mx.cuda.is_available():
                 return "CUDA"
@@ -95,6 +106,7 @@ def format_mlx_device_summary(device):
     """Build a detailed MLX device summary for console output."""
     backend = detect_mlx_backend(device)
     details = []
+    device_type = getattr(device, "type", device)
     try:
         info = mx.device_info(device)
     except Exception:
@@ -108,9 +120,18 @@ def format_mlx_device_summary(device):
     if architecture and architecture != device_name:
         details.append(f"arch={architecture}")
 
+    if hasattr(device, "type"):
+        label = str(device)
+    elif device_type == mx.cpu:
+        label = "cpu"
+    elif device_type == mx.gpu:
+        label = "gpu"
+    else:
+        label = str(device)
+
     if details:
-        return f"{device} [{backend}] ({', '.join(details)})"
-    return f"{device} [{backend}]"
+        return f"{label} [{backend}] ({', '.join(details)})"
+    return f"{label} [{backend}]"
 
 
 class MlxBackend:
@@ -122,24 +143,35 @@ class MlxBackend:
         """Initialize MLX backend and CPU stream pool when needed."""
         self.device = device
         self.cpu_workers = cpu_workers
-        if device == "gpu" and not mlx_gpu_is_available():
+        if device in {"gpu", "hybrid"} and not mlx_gpu_is_available():
             raise UnsupportedFeatureError(
                 "MLX GPU backend is unavailable on this system. "
                 "No supported GPU was detected. Use --device cpu."
             )
-        device_map = {"cpu": mx.cpu, "gpu": mx.gpu}
-        mx.set_default_device(device_map[device])
-        self.streams = [mx.new_stream(mx.cpu) for _ in range(cpu_workers)] if device == "cpu" else []
+        self.cpu_streams = []
+        self.gpu_stream = None
+        if device == "cpu":
+            mx.set_default_device(mx.cpu)
+            self.cpu_streams = [mx.new_stream(mx.cpu) for _ in range(cpu_workers)]
+        elif device == "gpu":
+            mx.set_default_device(mx.gpu)
+        else:
+            self.cpu_streams = [mx.new_stream(mx.cpu) for _ in range(cpu_workers)]
+            self.gpu_stream = mx.new_stream(mx.gpu)
 
     def device_summary(self):
         """Return printable summary of currently selected MLX device."""
+        if self.device == "hybrid":
+            return f"{format_mlx_device_summary(mx.cpu)} + {format_mlx_device_summary(mx.gpu)}"
         return format_mlx_device_summary(mx.default_device())
 
     def parallelism_summary(self):
         """Return printable summary of MLX CPU parallelism settings."""
+        if self.device == "hybrid":
+            return f"cpu_workers={self.cpu_workers} (MLX streams), gpu_stream=1"
         return f"workers={self.cpu_workers} (MLX streams)"
 
-    def prepare_case(self, work_n, dtype, is_inexact, use_quant_ops, quant_bits, quant_group_size):
+    def prepare_case(self, metric, work_n, dtype, is_inexact, use_quant_ops, quant_bits, quant_group_size):
         """Prepare and materialize tensors for a single matrix size case."""
         if use_quant_ops:
             x = mx.random.uniform(shape=(work_n, work_n), dtype=mx.float32)
@@ -158,7 +190,19 @@ class MlxBackend:
                 "q_biases": q_biases,
             }
 
+        if self.device == "hybrid":
+            with mx.stream(mx.cpu):
+                cpu_a = make_mlx_input(work_n, dtype, is_inexact)
+            with mx.stream(self.gpu_stream):
+                gpu_a = make_mlx_input(work_n, dtype, is_inexact)
+            mx.eval(cpu_a, gpu_a)
+            return {"cpu_a": cpu_a, "gpu_a": gpu_a}
+
         a = make_mlx_input(work_n, dtype, is_inexact)
+        if metric == "bandwidth":
+            mx.eval(a)
+            return {"a": a}
+
         b = make_mlx_input(work_n, dtype, is_inexact)
         mx.eval(a, b)
         return {"a": a, "b": b}
@@ -172,7 +216,7 @@ class MlxBackend:
             q_biases = case["q_biases"]
             if self.device == "cpu":
                 outs = []
-                for stream_idx, stream in enumerate(self.streams):
+                for stream_idx, stream in enumerate(self.cpu_streams):
                     start = stream_idx * work_n // self.cpu_workers
                     end = (stream_idx + 1) * work_n // self.cpu_workers
                     x_part = x[start:end]
@@ -199,42 +243,61 @@ class MlxBackend:
             mx.eval(*outs)
             return
 
+        if self.device == "hybrid":
+            cpu_a = case["cpu_a"]
+            gpu_a = case["gpu_a"]
+            cpu_outs = []
+            for stream_idx, stream in enumerate(self.cpu_streams):
+                start = stream_idx * work_n // self.cpu_workers
+                end = (stream_idx + 1) * work_n // self.cpu_workers
+                cpu_part = cpu_a[start:end]
+                with mx.stream(stream):
+                    cpu_out = materialize_copy(cpu_part)
+                cpu_outs.append(cpu_out)
+            with mx.stream(self.gpu_stream):
+                gpu_out = materialize_copy(gpu_a)
+            mx.eval(*cpu_outs, gpu_out)
+            return
+
         a = case["a"]
-        b = case["b"]
         if self.device == "cpu":
             outs = []
-            for stream_idx, stream in enumerate(self.streams):
+            for stream_idx, stream in enumerate(self.cpu_streams):
                 start = stream_idx * work_n // self.cpu_workers
                 end = (stream_idx + 1) * work_n // self.cpu_workers
                 a_part = a[start:end]
-                b_part = b[start:end]
                 with mx.stream(stream):
                     if metric == "bandwidth":
-                        out = mx.array(a_part)
+                        out = materialize_copy(a_part)
                     elif metric == "flops":
+                        b_part = case["b"][start:end]
                         if use_iops:
                             out = exact_compute_once(a_part, b_part)
                         else:
-                            out = a_part @ b
+                            out = a_part @ case["b"]
                     else:
+                        b_part = case["b"][start:end]
                         z = a_part
                         if use_iops:
                             for _ in range(graph_steps):
                                 z = exact_compute_once(z, b_part)
                         else:
+                            b = case["b"]
                             for _ in range(graph_steps):
                                 z = (z @ b) + z
                         out = z
                 outs.append(out)
         else:
             if metric == "bandwidth":
-                out = mx.array(a)
+                out = materialize_copy(a)
             elif metric == "flops":
+                b = case["b"]
                 if use_iops:
                     out = exact_compute_once(a, b)
                 else:
                     out = a @ b
             else:
+                b = case["b"]
                 z = a
                 if use_iops:
                     for _ in range(graph_steps):

@@ -57,7 +57,7 @@ uv tool install git+ssh://git@github.com/anfedoro/nn-backend-test.git
 
 - `--cpu-workers N`: CPU parallelism limit (`0` = all CPU cores).
 - `--cpu-streams N`: deprecated alias for `--cpu-workers`.
-- `--device {cpu,gpu}`: logical target device.
+- `--device {cpu,gpu,hybrid}`: logical target device.
 - `--dtype`: MLX dtype token (for example `float32`, `bfloat16`, `int8`, `uint32`, `complex64`) or quantized alias (`q2`, `q3`, `q4`, `q5`, `q6`, `q8`).
 - `--metric {bandwidth,flops,flops_graph}`: benchmark mode.
 - `--graph-steps N`: steps for `flops_graph`.
@@ -81,9 +81,16 @@ Units for compute metrics:
 ## Device Notes
 
 - `--device gpu` requires a visible MLX GPU backend.
+- `--device hybrid` is supported only for `--metric bandwidth`.
+- `--device hybrid` runs CPU copy and GPU copy together as an experimental unified-memory contention benchmark.
+- `--device hybrid` is not an isolated peak benchmark; results depend on real CPU/GPU overlap inside MLX.
 - On Apple platforms this is Metal.
 - On Linux this is CUDA.
 - If GPU backend is unavailable, the script exits with a clear error.
+
+Hybrid limitations:
+- If MLX serializes CPU and GPU execution internally, aggregate bandwidth will be lower than expected.
+- Hybrid results are empirical and runtime/platform dependent.
 
 ## MLX Integer Fallback Note
 
@@ -117,6 +124,12 @@ Use all CPU cores:
 uv run python main.py --metric bandwidth --device cpu --cpu-workers 0 --sizes 1024 2048 --dtype float32
 ```
 
+Run hybrid CPU+GPU bandwidth contention benchmark:
+
+```bash
+uv run python main.py --metric bandwidth --device hybrid --cpu-workers 0 --sizes 1024 2048 --dtype float32
+```
+
 Save CSV:
 
 ```bash
@@ -135,6 +148,11 @@ uv run python main.py --metric bandwidth --sizes 1024 2048 --csv result.csv
 For `--metric bandwidth`:
 - `I/O MiB`: estimated per-run data traffic (`read src + write dst`)
 - `GB/s`: effective memory bandwidth
+
+For `--metric bandwidth --device hybrid`:
+- `matrix MiB`: total source matrix footprint across CPU and GPU
+- `I/O MiB`: combined CPU + GPU per-run traffic
+- `GB/s`: aggregate bandwidth from shared wall time
 
 For `--metric flops` and `--metric flops_graph`:
 - inexact dtypes -> `GFLOPS/TFLOPS`
