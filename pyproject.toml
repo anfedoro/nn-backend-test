@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nn-backend-test"
-version = "0.1.0"
+version = "0.1.1"
 description = "MLX benchmark utility for matrix throughput checks"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "numpy>=2.0.0",
-    "mlx>=0.30.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
-    "mlx[cuda]>=0.30.0; sys_platform == 'linux'",
+    "mlx>=0.31.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "mlx>=0.31.1; sys_platform == 'linux'",
+    "mlx-cuda-13>=0.31.1; sys_platform == 'linux'",
 ]
 
 [project.scripts]

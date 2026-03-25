@@ -36,7 +36,7 @@ uv tool install git+https://github.com/anfedoro/nn-backend-test.git
 
 Platform-dependent MLX install is handled automatically by dependency markers:
 - Apple Silicon (`darwin/arm64`) -> `mlx`
-- Linux (`linux`, any CPU arch) -> `mlx[cuda]`
+- Linux (`linux`, any CPU arch) -> `mlx` + `mlx-cuda-13`
 
 This project targets only those two MLX paths.
 
@@ -85,7 +85,7 @@ Units for compute metrics:
 - `--device hybrid` runs CPU copy and GPU copy together as an experimental unified-memory contention benchmark.
 - `--device hybrid` is not an isolated peak benchmark; results depend on real CPU/GPU overlap inside MLX.
 - On Apple platforms this is Metal.
-- On Linux this is CUDA.
+- On Linux this is CUDA. The package installs the explicit `mlx-cuda-13` runtime stack.
 - If GPU backend is unavailable, the script exits with a clear error.
 
 Hybrid limitations:
