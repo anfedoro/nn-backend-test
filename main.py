@@ -165,10 +165,7 @@ def main():
     print(f"DType: {args.dtype}")
 
     if args.metric == "bandwidth":
-        if args.device == "hybrid":
-            print("Compute mode: hybrid bandwidth (copy, experimental contention benchmark)")
-        else:
-            print("Compute mode: bandwidth (copy)")
+        print(f"Compute mode: {backend.bandwidth_compute_mode()}")
     elif use_quant_ops:
         print(f"Compute mode: quantized_matmul (q{quant_bits}, affine)")
     elif use_iops:
@@ -179,6 +176,8 @@ def main():
     print("Transfer accounting: excluded (device-local tensors reused across runs)")
     if args.device == "hybrid":
         print("Hybrid note: aggregate bandwidth depends on real CPU/GPU overlap inside MLX.")
+    if args.metric == "bandwidth" and backend.uses_cuda_bandwidth_fallback():
+        print("CUDA note: bandwidth falls back to an a + b proxy kernel to avoid CUDA toolkit requirements.")
     if use_iops and args.metric in {"flops", "flops_graph"}:
         print(
             "Warning: MLX integer matmul is unavailable for this path. "
@@ -231,20 +230,15 @@ def main():
             row["weight_mib"] = weight_bytes / (1024**2)
             row["effective_n"] = work_n
         else:
-            if args.device == "hybrid" and args.metric == "bandwidth":
-                row["matrix_mib"] = (2 * matrix_bytes) / (1024**2)
+            if args.metric == "bandwidth":
+                row["matrix_mib"] = (backend.bandwidth_matrix_multiplier() * matrix_bytes) / (1024**2)
             else:
                 row["matrix_mib"] = matrix_bytes / (1024**2)
 
         if args.metric == "bandwidth":
-            if args.device == "hybrid":
-                total_bytes_per_run = 4 * matrix_bytes
-                row["io_mib"] = total_bytes_per_run / (1024**2)
-                row["bandwidth_gbps"] = total_bytes_per_run / median_s / 1e9
-            else:
-                bytes_per_run = 2 * matrix_bytes
-                row["io_mib"] = bytes_per_run / (1024**2)
-                row["bandwidth_gbps"] = bytes_per_run / median_s / 1e9
+            bytes_per_run = backend.bandwidth_io_multiplier() * matrix_bytes
+            row["io_mib"] = bytes_per_run / (1024**2)
+            row["bandwidth_gbps"] = bytes_per_run / median_s / 1e9
         elif args.metric == "flops":
             if use_quant_ops:
                 ops = 2 * (work_n**3)

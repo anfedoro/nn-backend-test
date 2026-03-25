@@ -143,6 +143,7 @@ class MlxBackend:
         """Initialize MLX backend and CPU stream pool when needed."""
         self.device = device
         self.cpu_workers = cpu_workers
+        self.gpu_backend_name = detect_mlx_backend(mx.gpu) if device in {"gpu", "hybrid"} else None
         if device in {"gpu", "hybrid"} and not mlx_gpu_is_available():
             raise UnsupportedFeatureError(
                 "MLX GPU backend is unavailable on this system. "
@@ -171,6 +172,38 @@ class MlxBackend:
             return f"cpu_workers={self.cpu_workers} (MLX streams), gpu_stream=1"
         return f"workers={self.cpu_workers} (MLX streams)"
 
+    def uses_cuda_bandwidth_fallback(self):
+        """Return True when bandwidth path should avoid CUDA copy kernels."""
+        return self.gpu_backend_name == "CUDA"
+
+    def bandwidth_compute_mode(self):
+        """Return a user-facing description for the active bandwidth path."""
+        if self.device == "hybrid":
+            if self.uses_cuda_bandwidth_fallback():
+                return "hybrid bandwidth (CPU copy + CUDA fallback a + b, experimental contention benchmark)"
+            return "hybrid bandwidth (copy, experimental contention benchmark)"
+        if self.uses_cuda_bandwidth_fallback():
+            return "bandwidth (CUDA fallback: a + b)"
+        return "bandwidth (copy)"
+
+    def bandwidth_matrix_multiplier(self):
+        """Return source-matrix footprint multiplier for reporting."""
+        if self.device == "hybrid":
+            if self.uses_cuda_bandwidth_fallback():
+                return 3
+            return 2
+        return 1
+
+    def bandwidth_io_multiplier(self):
+        """Return per-run traffic multiplier for reporting."""
+        if self.device == "hybrid":
+            if self.uses_cuda_bandwidth_fallback():
+                return 5
+            return 4
+        if self.uses_cuda_bandwidth_fallback():
+            return 3
+        return 2
+
     def prepare_case(self, metric, work_n, dtype, is_inexact, use_quant_ops, quant_bits, quant_group_size):
         """Prepare and materialize tensors for a single matrix size case."""
         if use_quant_ops:
@@ -195,11 +228,19 @@ class MlxBackend:
                 cpu_a = make_mlx_input(work_n, dtype, is_inexact)
             with mx.stream(self.gpu_stream):
                 gpu_a = make_mlx_input(work_n, dtype, is_inexact)
+                if self.uses_cuda_bandwidth_fallback():
+                    gpu_b = make_mlx_input(work_n, dtype, is_inexact)
+                    mx.eval(cpu_a, gpu_a, gpu_b)
+                    return {"cpu_a": cpu_a, "gpu_a": gpu_a, "gpu_b": gpu_b}
             mx.eval(cpu_a, gpu_a)
             return {"cpu_a": cpu_a, "gpu_a": gpu_a}
 
         a = make_mlx_input(work_n, dtype, is_inexact)
         if metric == "bandwidth":
+            if self.uses_cuda_bandwidth_fallback():
+                b = make_mlx_input(work_n, dtype, is_inexact)
+                mx.eval(a, b)
+                return {"a": a, "b": b}
             mx.eval(a)
             return {"a": a}
 
@@ -255,7 +296,10 @@ class MlxBackend:
                     cpu_out = materialize_copy(cpu_part)
                 cpu_outs.append(cpu_out)
             with mx.stream(self.gpu_stream):
-                gpu_out = materialize_copy(gpu_a)
+                if self.uses_cuda_bandwidth_fallback():
+                    gpu_out = gpu_a + case["gpu_b"]
+                else:
+                    gpu_out = materialize_copy(gpu_a)
             mx.eval(*cpu_outs, gpu_out)
             return
 
@@ -289,7 +333,10 @@ class MlxBackend:
                 outs.append(out)
         else:
             if metric == "bandwidth":
-                out = materialize_copy(a)
+                if self.uses_cuda_bandwidth_fallback():
+                    out = a + case["b"]
+                else:
+                    out = materialize_copy(a)
             elif metric == "flops":
                 b = case["b"]
                 if use_iops:

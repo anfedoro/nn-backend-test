@@ -87,6 +87,7 @@ Units for compute metrics:
 - On Apple platforms this is Metal.
 - On Linux this is CUDA. The package installs the explicit `mlx-cuda-13` runtime stack.
 - Linux CLI entrypoints bootstrap bundled NVIDIA shared libraries from the installed Python environment automatically; manual `LD_LIBRARY_PATH` setup should not be required for the packaged tool.
+- On Linux/CUDA, `--metric bandwidth` uses an `a + b` fallback proxy kernel instead of pure copy to avoid requiring a local CUDA toolkit install.
 - If GPU backend is unavailable, the script exits with a clear error.
 
 Hybrid limitations:
@@ -147,12 +148,12 @@ uv run python main.py --metric bandwidth --sizes 1024 2048 --csv result.csv
 - `median ms`: median run time
 
 For `--metric bandwidth`:
-- `I/O MiB`: estimated per-run data traffic (`read src + write dst`)
+- `I/O MiB`: estimated per-run data traffic. Pure copy paths use `read src + write dst`; Linux/CUDA fallback uses `read A + read B + write C`.
 - `GB/s`: effective memory bandwidth
 
 For `--metric bandwidth --device hybrid`:
 - `matrix MiB`: total source matrix footprint across CPU and GPU
-- `I/O MiB`: combined CPU + GPU per-run traffic
+- `I/O MiB`: combined CPU + GPU per-run traffic. On Linux/CUDA this is `CPU copy + GPU a+b fallback`.
 - `GB/s`: aggregate bandwidth from shared wall time
 
 For `--metric flops` and `--metric flops_graph`:
