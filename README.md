@@ -1,3 +1,5 @@
+
+
 # nn-backend-test
 
 Small MLX benchmark utility for matrix throughput checks.
@@ -69,6 +71,7 @@ uv tool install git+ssh://git@github.com/anfedoro/nn-backend-test.git
 
 - `q1` is unsupported.
 - `q2/q3/q4/q5/q6/q8` are quantized aliases and are MLX-only.
+- Quantized aliases (`q*`) are unsupported for `--metric bandwidth`.
 - For quantized aliases, if `N` is incompatible with MLX quantization group sizes, the benchmark pads to an effective size and reports `eff n`.
 - Quantized MLX runs use `quantized_matmul`: activations stay in `float32`, quantized weights are stored as packed weights plus `float32` scales and biases, and the output is materialized in `float32`.
 - For exact dtypes (`int*`, `uint*`, `bool`) compute metrics use a simple integer kernel (no integer matmul path).
